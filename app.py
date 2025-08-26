@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
+# Importar módulo de escenarios
+from escenarios import show_escenarios_page
+
 # Importaciones para machine learning
 from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
@@ -17,8 +20,8 @@ from sklearn.preprocessing import LabelEncoder
 
 # ConfiguraciÃ³n de la pÃ¡gina
 st.set_page_config(
-    page_title="ðŸ“ˆ Sistema de PredicciÃ³n de Ventas ML",
-    page_icon="ðŸ“Š",
+    page_title="Sistema de Prediccion de Ventas ML",
+    #page_icon="ðŸ“Š",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -78,7 +81,25 @@ class SalesMLApp:
         try:
             # Leer archivo
             if uploaded_file.name.endswith('.csv'):
-                df_raw = pd.read_csv(uploaded_file, encoding='utf-8')
+                # Intentar diferentes codificaciones y parámetros
+                encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252']
+                df_raw = None
+                for encoding in encodings:
+                    try:
+                        uploaded_file.seek(0)
+                        df_raw = pd.read_csv(
+                            uploaded_file, 
+                            encoding=encoding,
+                            sep=None,
+                            engine='python',
+                            on_bad_lines='skip',
+                            quoting=3
+                        )
+                        break
+                    except (UnicodeDecodeError, pd.errors.ParserError):
+                        continue
+                if df_raw is None:
+                    raise ValueError("No se pudo leer el archivo con ninguna codificación")
             else:
                 df_raw = pd.read_excel(uploaded_file)
             
@@ -91,10 +112,17 @@ class SalesMLApp:
                 df_clean = df_raw.copy()
             
             # Resetear Ã­ndice y limpiar datos
+            print(df_clean.columns.to_list())
             df_clean = df_clean.reset_index(drop=True)
-            df_clean['Mes de gestiÃ³n'] = pd.to_datetime(df_clean['Mes de gestiÃ³n'])
+            df_clean['Mes'] = pd.to_datetime(df_clean['Mes de gestión'])
             df_clean['Venta UF'] = pd.to_numeric(df_clean['Venta UF'], errors='coerce')
-            df_clean = df_clean.dropna(subset=['Mes de gestiÃ³n', 'EEVV', 'Venta UF'])
+            
+            # Procesar campo Contratos si existe
+            if 'Contratos' in df_clean.columns:
+                df_clean['Contratos'] = pd.to_numeric(df_clean['Contratos'], errors='coerce')
+                df_clean = df_clean.dropna(subset=['Mes de gestión', 'EEVV', 'Venta UF', 'Contratos'])
+            else:
+                df_clean = df_clean.dropna(subset=['Mes de gestión', 'EEVV', 'Venta UF'])
             
             return df_clean
             
@@ -107,16 +135,16 @@ class SalesMLApp:
         df = df.copy()
         
         # Componentes de fecha
-        df['aÃ±o'] = df['Mes de gestiÃ³n'].dt.year
-        df['mes'] = df['Mes de gestiÃ³n'].dt.month
-        df['trimestre'] = df['Mes de gestiÃ³n'].dt.quarter
+        df['año'] = df['Mes'].dt.year
+        df['mes'] = df['Mes'].dt.month
+        df['trimestre'] = df['Mes'].dt.quarter
         
         # Features por ejecutivo
         df_features = []
         
         for ejecutivo in df['EEVV'].unique():
             exec_data = df[df['EEVV'] == ejecutivo].copy()
-            exec_data = exec_data.sort_values('Mes de gestiÃ³n')
+            exec_data = exec_data.sort_values('Mes')
             
             # Lag features
             exec_data['venta_lag1'] = exec_data['Venta UF'].shift(1)
@@ -137,6 +165,13 @@ class SalesMLApp:
             exec_data['min_hasta_fecha'] = exec_data['Venta UF'].expanding().min()
             exec_data['meses_desde_inicio'] = range(len(exec_data))
             
+            # Features de Contratos si existe la columna
+            if 'Contratos' in exec_data.columns:
+                exec_data['contratos_lag1'] = exec_data['Contratos'].shift(1)
+                exec_data['contratos_media_movil_3'] = exec_data['Contratos'].rolling(window=3, min_periods=1).mean()
+                exec_data['contratos_acumulados'] = exec_data['Contratos'].cumsum()
+                exec_data['ratio_venta_contratos'] = exec_data['Venta UF'] / (exec_data['Contratos'] + 1)
+            
             df_features.append(exec_data)
         
         return pd.concat(df_features, ignore_index=True).dropna()
@@ -148,9 +183,14 @@ class SalesMLApp:
         df_model_encoded = df_model.copy()
         df_model_encoded['EEVV_encoded'] = le.fit_transform(df_model['EEVV'])
         
-        feature_columns = ['EEVV_encoded', 'aÃ±o', 'mes', 'trimestre', 'venta_lag1', 'venta_lag2', 'venta_lag3', 
+        feature_columns = ['EEVV_encoded', 'año', 'mes', 'trimestre', 'venta_lag1', 'venta_lag2', 'venta_lag3', 
                           'media_movil_3', 'media_movil_6', 'tendencia', 'venta_acumulada', 
                           'promedio_hasta_fecha', 'max_hasta_fecha', 'min_hasta_fecha', 'meses_desde_inicio']
+        
+        # Agregar features de Contratos si existe la columna
+        if 'Contratos' in df_model.columns:
+            contratos_features = ['contratos_lag1', 'contratos_media_movil_3', 'contratos_acumulados', 'ratio_venta_contratos']
+            feature_columns.extend(contratos_features)
         
         X = df_model_encoded[feature_columns]
         y = df_model_encoded['Venta UF']
@@ -206,7 +246,7 @@ class SalesMLApp:
 # FunciÃ³n principal de la app
 def main():
     # Header principal
-    st.markdown('<h1 class="main-header">ðŸ“ˆ Sistema de PredicciÃ³n de Ventas con Machine Learning</h1>', 
+    st.markdown('<h1 class="main-header">Sistema de Prediccion de Ventas con Machine Learning</h1>', 
                 unsafe_allow_html=True)
     
     # Inicializar app
@@ -216,92 +256,105 @@ def main():
     app = st.session_state.app
     
     # Sidebar para navegaciÃ³n
-    st.sidebar.title("ðŸŽ›ï¸ Panel de Control")
+    st.sidebar.title("Panel de Control")
     
     # Upload de archivo
     uploaded_file = st.sidebar.file_uploader(
-        "ðŸ“ Cargar archivo de ventas",
+        "Cargar archivo de ventas",
         type=['csv', 'xlsx'],
-        help="Archivo debe contener: Mes de gestiÃ³n, EEVV, Venta UF"
+        help="Archivo debe contener: Mes de gestion, EEVV, Venta UF, Contratos (opcional)"
     )
     
     if uploaded_file is not None:
         # Procesar datos
-        with st.spinner("ðŸ”„ Procesando datos..."):
+        with st.spinner("Procesando datos..."):
             app.df_clean = app.load_and_process_data(uploaded_file)
         
         if app.df_clean is not None:
-            st.sidebar.success(f"âœ… Datos cargados: {app.df_clean.shape[0]} registros")
+            st.sidebar.success(f"Datos cargados: {app.df_clean.shape[0]} registros")
             
             # Selector de pÃ¡gina
             page = st.sidebar.selectbox(
-                "ðŸ  NavegaciÃ³n",
-                ["ðŸ  Dashboard", "ðŸ“Š AnÃ¡lisis de Datos", "ðŸ¤– Modelos ML", "ðŸ”® Predicciones", "ðŸ“ˆ Visualizaciones"]
+                "Navegacion",
+                ["Dashboard", "Analisis de Datos", "Modelos ML", "Predicciones", "Escenarios", "Visualizaciones"]
             )
             
             # PÃGINA: DASHBOARD
-            if page == "ðŸ  Dashboard":
-                st.header("ðŸ  Dashboard General")
+            if page == "Dashboard":
+                st.header("Dashboard General")
                 
                 # MÃ©tricas principales
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
                     total_ventas = app.df_clean['Venta UF'].sum()
-                    st.metric("ðŸ’° Ventas Totales", f"{total_ventas:,.2f} UF")
+                    st.metric("Ventas Totales", f"{total_ventas:,.2f} UF")
                 
                 with col2:
                     promedio_ventas = app.df_clean['Venta UF'].mean()
-                    st.metric("ðŸ“Š Promedio Ventas", f"{promedio_ventas:.2f} UF")
+                    st.metric("Promedio Ventas", f"{promedio_ventas:.2f} UF")
                 
                 with col3:
                     num_ejecutivos = app.df_clean['EEVV'].nunique()
-                    st.metric("ðŸ‘¥ Ejecutivos", f"{num_ejecutivos}")
+                    st.metric("Ejecutivos", f"{num_ejecutivos}")
                 
                 with col4:
-                    periodo = f"{app.df_clean['Mes de gestiÃ³n'].min().strftime('%Y-%m')} / {app.df_clean['Mes de gestiÃ³n'].max().strftime('%Y-%m')}"
-                    st.metric("ðŸ“… PerÃ­odo", periodo)
+                    if 'Contratos' in app.df_clean.columns:
+                        total_contratos = app.df_clean['Contratos'].sum()
+                        st.metric("Total Contratos", f"{total_contratos:,.0f}")
+                    else:
+                        periodo = f"{app.df_clean['Mes'].min().strftime('%Y-%m')} / {app.df_clean['Mes'].max().strftime('%Y-%m')}"
+                        st.metric("Periodo", periodo)
                 
                 # GrÃ¡fico de ventas por mes
-                st.subheader("ðŸ“ˆ EvoluciÃ³n de Ventas Mensuales")
+                st.subheader("Evolucion de Ventas Mensuales")
                 
-                ventas_mensuales = app.df_clean.groupby('Mes de gestiÃ³n')['Venta UF'].agg(['sum', 'mean']).reset_index()
+                ventas_mensuales = app.df_clean.groupby('Mes')['Venta UF'].agg(['sum', 'mean']).reset_index()
                 
                 fig = make_subplots(specs=[[{"secondary_y": True}]])
                 
                 fig.add_trace(
-                    go.Scatter(x=ventas_mensuales['Mes de gestiÃ³n'], y=ventas_mensuales['sum'],
+                    go.Scatter(x=ventas_mensuales['Mes'], y=ventas_mensuales['sum'],
                               name="Total Mensual", line=dict(color='#1f77b4', width=3)),
                     secondary_y=False,
                 )
                 
                 fig.add_trace(
-                    go.Scatter(x=ventas_mensuales['Mes de gestiÃ³n'], y=ventas_mensuales['mean'],
+                    go.Scatter(x=ventas_mensuales['Mes'], y=ventas_mensuales['mean'],
                               name="Promedio Mensual", line=dict(color='#ff7f0e', width=2)),
                     secondary_y=True,
                 )
                 
                 fig.update_xaxes(title_text="Mes")
-                fig.update_yaxis(title_text="Ventas Totales (UF)", secondary_y=False)
-                fig.update_yaxis(title_text="Promedio (UF)", secondary_y=True)
+                fig.update_yaxes(title_text="Ventas Totales (UF)", secondary_y=False)
+                fig.update_yaxes(title_text="Promedio (UF)", secondary_y=True)
                 fig.update_layout(height=400)
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Top ejecutivos
-                st.subheader("ðŸ† Top 10 Ejecutivos")
-                top_ejecutivos = app.df_clean.groupby('EEVV')['Venta UF'].agg(['sum', 'mean', 'count']).round(2)
-                top_ejecutivos.columns = ['Total UF', 'Promedio UF', 'Registros']
-                top_ejecutivos = top_ejecutivos.sort_values('Promedio UF', ascending=False).head(10)
+                st.subheader("Top 10 Ejecutivos")
+                if 'Contratos' in app.df_clean.columns:
+                    top_ejecutivos = app.df_clean.groupby('EEVV').agg({
+                        'Venta UF': ['sum', 'mean'],
+                        'Contratos': ['sum', 'mean']
+                    }).round(2)
+                    top_ejecutivos.columns = ['Total UF', 'Promedio UF', 'Total Contratos', 'Promedio Contratos']
+                    top_ejecutivos['Ratio UF/Contrato'] = (top_ejecutivos['Total UF'] / top_ejecutivos['Total Contratos']).round(2)
+                    top_ejecutivos = top_ejecutivos.sort_values('Promedio UF', ascending=False).head(10)
+                else:
+                    top_ejecutivos = app.df_clean.groupby('EEVV')['Venta UF'].agg(['sum', 'mean', 'count']).round(2)
+                    top_ejecutivos.columns = ['Total UF', 'Promedio UF', 'Registros']
+                    top_ejecutivos = top_ejecutivos.sort_values('Promedio UF', ascending=False).head(10)
                 
                 st.dataframe(top_ejecutivos, use_container_width=True)
             
             # PÃGINA: ANÃLISIS DE DATOS
-            elif page == "ðŸ“Š AnÃ¡lisis de Datos":
-                st.header("ðŸ“Š AnÃ¡lisis Detallado de Datos")
+            elif page == "Analisis de Datos":
+                st.header("Analisis Detallado de Datos")
                 
                 # AnÃ¡lisis por ejecutivo
-                st.subheader("ðŸ‘¤ AnÃ¡lisis por Ejecutivo")
+                st.subheader("Analisis por Ejecutivo")
                 
                 ejecutivo_seleccionado = st.selectbox(
                     "Selecciona un ejecutivo:",
@@ -314,56 +367,122 @@ def main():
                     col1, col2, col3, col4 = st.columns(4)
                     
                     with col1:
-                        st.metric("ðŸ’° Total Ventas", f"{exec_data['Venta UF'].sum():.2f} UF")
+                        st.metric("Total Ventas", f"{exec_data['Venta UF'].sum():.2f} UF")
                     with col2:
-                        st.metric("ðŸ“Š Promedio", f"{exec_data['Venta UF'].mean():.2f} UF")
+                        st.metric("Promedio", f"{exec_data['Venta UF'].mean():.2f} UF")
                     with col3:
-                        st.metric("ðŸ“ˆ MÃ¡ximo", f"{exec_data['Venta UF'].max():.2f} UF")
+                        st.metric("Maximo", f"{exec_data['Venta UF'].max():.2f} UF")
                     with col4:
-                        st.metric("ðŸ“‰ MÃ­nimo", f"{exec_data['Venta UF'].min():.2f} UF")
+                        if 'Contratos' in app.df_clean.columns:
+                            st.metric("Total Contratos", f"{exec_data['Contratos'].sum():.0f}")
+                        else:
+                            st.metric("Mi­nimo", f"{exec_data['Venta UF'].min():.2f} UF")
                     
                     # GrÃ¡fico individual
-                    fig = px.line(exec_data.sort_values('Mes de gestiÃ³n'), 
-                                 x='Mes de gestiÃ³n', y='Venta UF',
-                                 title=f"EvoluciÃ³n de Ventas - {ejecutivo_seleccionado}",
-                                 markers=True)
-                    fig.update_layout(height=400)
-                    st.plotly_chart(fig, use_container_width=True)
+                    if 'Contratos' in app.df_clean.columns:
+                        # Gráfico dual con ventas y contratos
+                        fig = make_subplots(specs=[[{"secondary_y": True}]])
+                        
+                        fig.add_trace(
+                            go.Scatter(x=exec_data.sort_values('Mes')['Mes'], 
+                                      y=exec_data.sort_values('Mes')['Venta UF'],
+                                      name="Ventas UF", line=dict(color='blue'), 
+                                      mode='lines+markers'),
+                            secondary_y=False,
+                        )
+                        
+                        fig.add_trace(
+                            go.Scatter(x=exec_data.sort_values('Mes')['Mes'], 
+                                      y=exec_data.sort_values('Mes')['Contratos'],
+                                      name="Contratos", line=dict(color='green'), 
+                                      mode='lines+markers'),
+                            secondary_y=True,
+                        )
+                        
+                        fig.update_xaxes(title_text="Mes")
+                        fig.update_yaxes(title_text="Ventas (UF)", secondary_y=False)
+                        fig.update_yaxes(title_text="Contratos", secondary_y=True)
+                        fig.update_layout(height=400, title=f"Evolución de Ventas y Contratos - {ejecutivo_seleccionado}")
+                        
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        fig = px.line(exec_data.sort_values('Mes'), 
+                                     x='Mes', y='Venta UF',
+                                     title=f"Evolucion de Ventas - {ejecutivo_seleccionado}",
+                                     markers=True)
+                        fig.update_layout(height=400)
+                        st.plotly_chart(fig, use_container_width=True)
                     
                     # EstadÃ­sticas detalladas
-                    st.subheader("ðŸ“ˆ EstadÃ­sticas Detalladas")
-                    stats_df = exec_data.groupby('Mes de gestiÃ³n')['Venta UF'].sum().reset_index()
+                    st.subheader("Estadi­sticas Detalladas")
+                    if 'Contratos' in app.df_clean.columns:
+                        stats_df = exec_data.groupby('Mes').agg({
+                            'Venta UF': 'sum',
+                            'Contratos': 'sum'
+                        }).reset_index()
+                        stats_df['Ratio UF/Contrato'] = (stats_df['Venta UF'] / stats_df['Contratos']).round(2)
+                    else:
+                        stats_df = exec_data.groupby('Mes')['Venta UF'].sum().reset_index()
                     st.dataframe(stats_df, use_container_width=True)
                 
                 # DistribuciÃ³n de ventas
-                st.subheader("ðŸ“Š DistribuciÃ³n de Ventas")
+                st.subheader("Distribucion de Ventas")
                 
-                fig = px.histogram(app.df_clean, x='Venta UF', nbins=30, 
-                                 title="DistribuciÃ³n de Ventas por Registro")
-                st.plotly_chart(fig, use_container_width=True)
+                if 'Contratos' in app.df_clean.columns:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        fig = px.histogram(app.df_clean, x='Venta UF', nbins=30, 
+                                         title="Distribucion de Ventas por Registro")
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        fig = px.histogram(app.df_clean, x='Contratos', nbins=20, 
+                                         title="Distribucion de Contratos por Registro")
+                        st.plotly_chart(fig, use_container_width=True)
+                else:
+                    fig = px.histogram(app.df_clean, x='Venta UF', nbins=30, 
+                                     title="Distribucion de Ventas por Registro")
+                    st.plotly_chart(fig, use_container_width=True)
                 
                 # Matriz de correlaciÃ³n (si hay suficientes columnas numÃ©ricas)
                 numeric_cols = app.df_clean.select_dtypes(include=[np.number]).columns
                 if len(numeric_cols) > 1:
-                    st.subheader("ðŸ”— Matriz de CorrelaciÃ³n")
+                    st.subheader("Matriz de Correlacion")
                     correlation_matrix = app.df_clean[numeric_cols].corr()
                     
                     fig = px.imshow(correlation_matrix, 
-                                   title="CorrelaciÃ³n entre Variables NumÃ©ricas",
-                                   color_continuous_scale="RdYlBu_r")
+                                   title="Correlacion entre Variables Numericas",
+                                   color_continuous_scale="RdYlBu_r",
+                                   text_auto=True)
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Mostrar correlaciones más importantes
+                    if 'Contratos' in app.df_clean.columns:
+                        st.subheader("Correlaciones Clave")
+                        corr_contratos_ventas = app.df_clean['Contratos'].corr(app.df_clean['Venta UF'])
+                        
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Correlación Contratos-Ventas", f"{corr_contratos_ventas:.3f}")
+                        with col2:
+                            avg_uf_per_contract = (app.df_clean['Venta UF'].sum() / app.df_clean['Contratos'].sum())
+                            st.metric("UF Promedio por Contrato", f"{avg_uf_per_contract:.2f}")
+                        with col3:
+                            conversion_rate = (app.df_clean['Contratos'].sum() / len(app.df_clean)) * 100
+                            st.metric("Tasa de Conversión", f"{conversion_rate:.1f}%")
             
             # PÃGINA: MODELOS ML
-            elif page == "ðŸ¤– Modelos ML":
-                st.header("ðŸ¤– Entrenamiento de Modelos ML")
+            elif page == "Modelos ML":
+                st.header("Entrenamiento de Modelos ML")
                 
-                if st.button("ðŸš€ Entrenar Modelos", type="primary"):
-                    with st.spinner("ðŸ”§ Creando caracterÃ­sticas..."):
+                if st.button("Entrenar Modelos", type="primary"):
+                    with st.spinner("Creando caracteri­sticas..."):
                         app.df_model = app.create_features(app.df_clean)
                     
-                    st.success(f"âœ… CaracterÃ­sticas creadas: {app.df_model.shape}")
+                    st.success(f"CaracterÃ­sticas creadas: {app.df_model.shape}")
                     
-                    with st.spinner("ðŸ¤– Entrenando modelos ML..."):
+                    with st.spinner("– Entrenando modelos ML..."):
                         results, best_model, best_name, le, feature_cols = app.train_models(app.df_model)
                     
                     if results:
@@ -372,10 +491,10 @@ def main():
                         app.label_encoder = le
                         app.feature_columns = feature_cols
                         
-                        st.success(f"ðŸ† Mejor modelo: {best_name}")
+                        st.success(f"Mejor modelo: {best_name}")
                         
                         # Tabla de comparaciÃ³n
-                        st.subheader("ðŸ“Š ComparaciÃ³n de Modelos")
+                        st.subheader("Comparacion de Modelos")
                         
                         comparison_data = []
                         for name, metrics in results.items():
@@ -385,17 +504,17 @@ def main():
                                 'MAE Test': round(metrics['test_mae'], 3),
                                 'RMSE Train': round(metrics['train_rmse'], 3),
                                 'RMSE Test': round(metrics['test_rmse'], 3),
-                                'RÂ² Train': round(metrics['train_r2'], 3),
-                                'RÂ² Test': round(metrics['test_r2'], 3)
+                                'RA² Train': round(metrics['train_r2'], 3),
+                                'RA² Test': round(metrics['test_r2'], 3)
                             })
                         
                         comparison_df = pd.DataFrame(comparison_data)
                         st.dataframe(comparison_df, use_container_width=True)
                         
                         # GrÃ¡fico de comparaciÃ³n
-                        st.subheader("ðŸ“ˆ VisualizaciÃ³n de Rendimiento")
+                        st.subheader("Visualizacion de Rendimiento")
                         
-                        fig = make_subplots(rows=1, cols=2, subplot_titles=(['MAE Test', 'RÂ² Test']))
+                        fig = make_subplots(rows=1, cols=2, subplot_titles=(['MAE Test', 'RA² Test']))
                         
                         fig.add_trace(
                             go.Bar(x=comparison_df['Modelo'], y=comparison_df['MAE Test'],
@@ -404,8 +523,8 @@ def main():
                         )
                         
                         fig.add_trace(
-                            go.Bar(x=comparison_df['Modelo'], y=comparison_df['RÂ² Test'],
-                                   name='RÂ² Test', marker_color='lightblue'),
+                            go.Bar(x=comparison_df['Modelo'], y=comparison_df['RA² Test'],
+                                   name='RA² Test', marker_color='lightblue'),
                             row=1, col=2
                         )
                         
@@ -414,37 +533,37 @@ def main():
                 
                 # Mostrar informaciÃ³n de modelos entrenados
                 if hasattr(app, 'results') and app.results:
-                    st.subheader("â„¹ï¸ InformaciÃ³n de Modelos")
-                    st.info(f"âœ… Modelos entrenados: {len(app.results)}")
-                    st.info(f"ðŸ† Mejor modelo disponible para predicciones")
+                    st.subheader("InformaciÃ³n de Modelos")
+                    st.info(f"Modelos entrenados: {len(app.results)}")
+                    st.info(f"Mejor modelo disponible para predicciones")
             
             # PÃGINA: PREDICCIONES
-            elif page == "ðŸ”® Predicciones":
-                st.header("ðŸ”® Generar Predicciones")
+            elif page == "Predicciones":
+                st.header("Generar Predicciones")
                 
                 if not hasattr(app, 'best_model') or app.best_model is None:
-                    st.warning("âš ï¸ Primero debes entrenar los modelos en la secciÃ³n 'ðŸ¤– Modelos ML'")
+                    st.warning("Primero debes entrenar los modelos en la seccion – Modelos ML")
                 else:
-                    st.success("âœ… Modelo listo para predicciones")
+                    st.success("Modelo listo para predicciones")
                     
                     col1, col2 = st.columns(2)
                     
                     with col1:
                         ejecutivo_pred = st.selectbox(
-                            "ðŸ‘¤ Seleccionar Ejecutivo:",
+                            "Seleccionar Ejecutivo:",
                             options=sorted(app.df_clean['EEVV'].unique()),
                             key="pred_ejecutivo"
                         )
                     
                     with col2:
                         meses_pred = st.slider(
-                            "ðŸ“… Meses a predecir:",
+                            "Meses a predecir:",
                             min_value=1, max_value=12, value=3
                         )
                     
-                    if st.button("ðŸ”® Generar PredicciÃ³n", type="primary"):
+                    if st.button("Generar Prediccion", type="primary"):
                         # Obtener datos del ejecutivo
-                        exec_data = app.df_model[app.df_model['EEVV'] == ejecutivo_pred].sort_values('Mes de gestiÃ³n')
+                        exec_data = app.df_model[app.df_model['EEVV'] == ejecutivo_pred].sort_values('Mes')
                         
                         if not exec_data.empty:
                             # Generar predicciones simples (basadas en tendencia histÃ³rica)
@@ -453,7 +572,7 @@ def main():
                             tendencia = last_records['Venta UF'].diff().mean()
                             
                             predicciones = []
-                            fecha_base = exec_data['Mes de gestiÃ³n'].max()
+                            fecha_base = exec_data['Mes'].max()
                             
                             for i in range(1, meses_pred + 1):
                                 nueva_fecha = fecha_base + timedelta(days=30*i)
@@ -462,60 +581,63 @@ def main():
                                 predicciones.append({
                                     'Mes': nueva_fecha.strftime('%Y-%m'),
                                     'Fecha': nueva_fecha,
-                                    'PredicciÃ³n (UF)': round(pred_valor, 2),
+                                    'Prediccion (UF)': round(pred_valor, 2),
                                     'Confianza (%)': max(85 - i*3, 60)
                                 })
                             
                             pred_df = pd.DataFrame(predicciones)
                             
                             # Mostrar resultados
-                            st.subheader(f"ðŸ“Š Predicciones para {ejecutivo_pred}")
+                            st.subheader(f"Predicciones para {ejecutivo_pred}")
                             
                             col1, col2, col3 = st.columns(3)
                             with col1:
-                                st.metric("ðŸ’° Total Predicho", f"{pred_df['PredicciÃ³n (UF)'].sum():.2f} UF")
+                                st.metric("Total Predicho", f"{pred_df['Prediccion (UF)'].sum():.2f} UF")
                             with col2:
-                                st.metric("ðŸ“Š Promedio Mensual", f"{pred_df['PredicciÃ³n (UF)'].mean():.2f} UF")
+                                st.metric("Promedio Mensual", f"{pred_df['Prediccion (UF)'].mean():.2f} UF")
                             with col3:
-                                st.metric("ðŸŽ¯ Confianza Promedio", f"{pred_df['Confianza (%)'].mean():.0f}%")
+                                st.metric("Confianza Promedio", f"{pred_df['Confianza (%)'].mean():.0f}%")
                             
                             # Tabla de predicciones
-                            st.dataframe(pred_df[['Mes', 'PredicciÃ³n (UF)', 'Confianza (%)']], use_container_width=True)
+                            st.dataframe(pred_df[['Mes', 'Prediccion (UF)', 'Confianza (%)']], use_container_width=True)
                             
                             # GrÃ¡fico de predicciones
-                            historico = exec_data[['Mes de gestiÃ³n', 'Venta UF']].copy()
-                            historico['Tipo'] = 'HistÃ³rico'
+                            historico = exec_data[['Mes', 'Venta UF']].copy()
+                            historico['Tipo'] = 'Historico'
                             historico = historico.rename(columns={'Venta UF': 'Valor'})
                             
-                            futuro = pred_df[['Fecha', 'PredicciÃ³n (UF)']].copy()
-                            futuro['Tipo'] = 'PredicciÃ³n'
-                            futuro = futuro.rename(columns={'Fecha': 'Mes de gestiÃ³n', 'PredicciÃ³n (UF)': 'Valor'})
+                            futuro = pred_df[['Fecha', 'Prediccion (UF)']].copy()
+                            futuro['Tipo'] = 'Prediccion'
+                            futuro = futuro.rename(columns={'Fecha': 'Mes', 'Prediccion (UF)': 'Valor'})
                             
                             combined = pd.concat([historico, futuro], ignore_index=True)
                             
-                            fig = px.line(combined, x='Mes de gestiÃ³n', y='Valor', 
+                            fig = px.line(combined, x='Mes', y='Valor', 
                                          color='Tipo', markers=True,
-                                         title=f"Ventas HistÃ³ricas vs Predicciones - {ejecutivo_pred}")
+                                         title=f"Ventas Historicas vs Predicciones - {ejecutivo_pred}")
                             fig.update_layout(height=400)
                             st.plotly_chart(fig, use_container_width=True)
                             
                             # OpciÃ³n de descarga
                             csv = pred_df.to_csv(index=False)
                             st.download_button(
-                                label="ðŸ“¥ Descargar Predicciones CSV",
+                                label="Descargar Predicciones CSV",
                                 data=csv,
                                 file_name=f"predicciones_{ejecutivo_pred.replace(' ', '_')}_{datetime.now().strftime('%Y%m%d')}.csv",
                                 mime='text/csv'
                             )
                         else:
-                            st.error("âŒ No se encontraron datos para este ejecutivo")
+                            st.error("No se encontraron datos para este ejecutivo")
             
             # PÃGINA: VISUALIZACIONES
-            elif page == "ðŸ“ˆ Visualizaciones":
-                st.header("ðŸ“ˆ Visualizaciones Interactivas")
+            elif page == "Escenarios":
+                show_escenarios_page(app)
+            
+            elif page == "Visualizaciones":
+                st.header("Visualizaciones Interactivas")
                 
                 # GrÃ¡fico de barras por ejecutivo
-                st.subheader("ðŸ“Š Ventas por Ejecutivo")
+                st.subheader("Ventas por Ejecutivo")
                 
                 ventas_ejecutivo = app.df_clean.groupby('EEVV')['Venta UF'].sum().sort_values(ascending=True).tail(15)
                 
@@ -525,13 +647,13 @@ def main():
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # Heatmap de ventas por mes y ejecutivo
-                st.subheader("ðŸ—“ï¸ Mapa de Calor: Ventas por Mes y Ejecutivo")
+                st.subheader("Mapa de Calor: Ventas por Mes y Ejecutivo")
                 
                 # Preparar datos para heatmap
                 pivot_data = app.df_clean.pivot_table(
                     values='Venta UF', 
                     index='EEVV', 
-                    columns=app.df_clean['Mes de gestiÃ³n'].dt.strftime('%Y-%m'),
+                    columns=app.df_clean['Mes'].dt.strftime('%Y-%m'),
                     aggfunc='sum',
                     fill_value=0
                 )
@@ -547,52 +669,104 @@ def main():
                 fig.update_layout(height=600)
                 st.plotly_chart(fig, use_container_width=True)
                 
+                # Heatmap de contratos si existe la columna
+                if 'Contratos' in app.df_clean.columns:
+                    st.subheader("Mapa de Calor: Contratos por Mes y Ejecutivo")
+                    
+                    pivot_contratos = app.df_clean.pivot_table(
+                        values='Contratos', 
+                        index='EEVV', 
+                        columns=app.df_clean['Mes'].dt.strftime('%Y-%m'),
+                        aggfunc='sum',
+                        fill_value=0
+                    )
+                    
+                    pivot_contratos_subset = pivot_contratos.loc[top_executives]
+                    
+                    fig = px.imshow(pivot_contratos_subset, 
+                                   title="Contratos por Ejecutivo y Mes",
+                                   aspect="auto",
+                                   color_continuous_scale="Blues")
+                    fig.update_layout(height=600)
+                    st.plotly_chart(fig, use_container_width=True)
+                
                 # Scatter plot de consistencia
-                st.subheader("ðŸŽ¯ AnÃ¡lisis de Consistencia")
+                st.subheader("Analisis de Consistencia")
                 
                 consistency_data = app.df_clean.groupby('EEVV')['Venta UF'].agg(['mean', 'std']).reset_index()
-                consistency_data.columns = ['Ejecutivo', 'Promedio', 'DesviaciÃ³n']
+                consistency_data.columns = ['Ejecutivo', 'Promedio', 'Desviacion']
                 
-                fig = px.scatter(consistency_data, x='Promedio', y='DesviaciÃ³n',
+                fig = px.scatter(consistency_data, x='Promedio', y='Desviacion',
                                 hover_data=['Ejecutivo'],
                                 title="Promedio vs Variabilidad de Ventas",
-                                labels={'Promedio': 'Venta Promedio (UF)', 'DesviaciÃ³n': 'DesviaciÃ³n EstÃ¡ndar'})
+                                labels={'Promedio': 'Venta Promedio (UF)', 'Desviacion': 'Desviacion EstÃ¡ndar'})
                 st.plotly_chart(fig, use_container_width=True)
+                
+                # Análisis de Contratos (si existe la columna)
+                if 'Contratos' in app.df_clean.columns:
+                    st.subheader("Análisis de Contratos")
+                    
+                    # Relación Ventas vs Contratos
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Scatter plot Ventas vs Contratos
+                        scatter_data = app.df_clean.groupby('EEVV').agg({
+                            'Venta UF': 'sum',
+                            'Contratos': 'sum'
+                        }).reset_index()
+                        
+                        fig = px.scatter(scatter_data, x='Contratos', y='Venta UF',
+                                        hover_data=['EEVV'],
+                                        title="Relación Contratos vs Ventas por Ejecutivo")
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    with col2:
+                        # Ratio UF por Contrato
+                        scatter_data['Ratio_UF_Contrato'] = scatter_data['Venta UF'] / scatter_data['Contratos']
+                        
+                        fig = px.bar(scatter_data.sort_values('Ratio_UF_Contrato', ascending=False).head(15),
+                                    x='Ratio_UF_Contrato', y='EEVV',
+                                    orientation='h',
+                                    title="Top 15: UF por Contrato")
+                        st.plotly_chart(fig, use_container_width=True)
         else:
             st.error("âŒ Error al procesar el archivo. Verifica el formato y columnas.")
     
     else:
         # PÃ¡gina de bienvenida
-        st.info("ðŸ‘‹ Â¡Bienvenido al Sistema de PredicciÃ³n de Ventas!")
+        st.info("Bienvenido al Sistema de Prediccion de Ventas!")
         st.markdown("""
-        ### ðŸš€ Â¿CÃ³mo empezar?
+        ### Como empezar?
         
-        1. **ðŸ“ Carga tu archivo** de ventas en el panel lateral
-        2. **ðŸ“Š Explora los datos** en las diferentes secciones
-        3. **ðŸ¤– Entrena modelos** de Machine Learning
-        4. **ðŸ”® Genera predicciones** para tus ejecutivos
+        1. Carga tu archivo** de ventas en el panel lateral
+        2. Explora los datos** en las diferentes secciones
+        3. Entrena modelos** de Machine Learning
+        4. Genera predicciones** para tus ejecutivos
         
-        ### ðŸ“‹ Requisitos del archivo:
+        ###  Requisitos del archivo:
         - Formato: **CSV** o **Excel**
         - Columnas requeridas:
-          - **Mes de gestiÃ³n**: Fecha del perÃ­odo
+          - **Mes de gestion**: Fecha del periodo
           - **EEVV**: Nombre del ejecutivo
           - **Venta UF**: Ventas en Unidades de Fomento
+          - **Contratos**: Número de contratos (opcional pero recomendado)
         
-        ### âœ¨ CaracterÃ­sticas principales:
-        - ðŸ¤– **4 algoritmos de ML** diferentes
-        - ðŸ“Š **Visualizaciones interactivas** con Plotly
-        - ðŸ”® **Predicciones personalizadas** por ejecutivo
-        - ðŸ“ˆ **AnÃ¡lisis detallado** de rendimiento
-        - ðŸ“¥ **ExportaciÃ³n** de resultados
+        ###  Caracteri­sticas principales:
+        - **4 algoritmos de ML** diferentes
+        - **Visualizaciones interactivas** con Plotly
+        - **Predicciones personalizadas** por ejecutivo
+        - **Analisis detallado** de rendimiento
+        - **Exportacion** de resultados
         """)
         
         # Ejemplo de datos
-        st.subheader("ðŸ“ Ejemplo de formato de datos")
+        st.subheader("Ejemplo de formato de datos")
         example_data = pd.DataFrame({
-            'Mes de gestiÃ³n': ['2025-01-01', '2025-02-01', '2025-03-01'],
-            'EEVV': ['Juan PÃ©rez', 'MarÃ­a GarcÃ­a', 'Carlos LÃ³pez'],
-            'Venta UF': [25.50, 32.75, 18.90]
+            'Mes de gestión': ['2025-01-01', '2025-02-01', '2025-03-01'],
+            'EEVV': ['Juan Perez', 'Mari­a Garcia', 'Carlos Lopez'],
+            'Venta UF': [25.50, 32.75, 18.90],
+            'Contratos': [3, 4, 2]
         })
         st.dataframe(example_data, use_container_width=True)
 
